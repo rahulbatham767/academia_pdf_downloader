@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180">
+  <defs>
+    <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#c9a84c"/>
+      <stop offset="100%" stop-color="#7a5c20"/>
+    </linearGradient>
+  </defs>
+  <rect width="180" height="180" rx="40" fill="url(#g)"/>
+  <!-- Document -->
+  <rect x="38" y="28" width="82" height="110" rx="8" fill="rgba(10,10,15,0.88)"/>
+  <!-- Fold -->
+  <path d="M96 28 L120 52 L96 52 Z" fill="rgba(201,168,76,0.45)"/>
+  <rect x="96" y="28" width="24" height="24" rx="3" fill="rgba(10,10,15,0.88)"/>
+  <path d="M96 28 L120 52 L96 52 Z" fill="rgba(201,168,76,0.38)"/>
+  <!-- Lines -->
+  <rect x="52" y="70" width="58" height="8" rx="4" fill="rgba(201,168,76,0.7)"/>
+  <rect x="52" y="86" width="58" height="8" rx="4" fill="rgba(201,168,76,0.5)"/>
+  <rect x="52" y="102" width="40" height="8" rx="4" fill="rgba(201,168,76,0.4)"/>
+  <!-- Download circle -->
+  <circle cx="136" cy="148" r="34" fill="#0a0a0f"/>
+  <circle cx="136" cy="148" r="30" fill="url(#g)"/>
+  <!-- Arrow -->
+  <path d="M136 130 L136 158" stroke="#0a0a0f" stroke-width="8" stroke-linecap="round"/>
+  <path d="M120 148 L136 164 L152 148" stroke="#0a0a0f" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+</svg>
