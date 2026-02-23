@@ -637,7 +637,7 @@ export default function Home() {
                     Academia.edu
                   </span>
                 </div>
-                <div
+                {/* <div
                   className="flex items-center gap-2 px-3 py-1.5 rounded-full"
                   style={{
                     background: 'rgba(201,168,76,0.06)',
@@ -648,7 +648,8 @@ export default function Home() {
                   <span className="text-xs font-mono" style={{ color: 'rgba(245,240,232,0.35)' }}>
                     Scribd
                   </span>
-                </div>
+
+                </div> */}
               </div>
             </div>
           </div>

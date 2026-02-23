@@ -1,183 +1,183 @@
 import { NextRequest, NextResponse } from 'next/server';
+import chromium from '@sparticuz/chromium';
+import puppeteer, { Browser } from 'puppeteer-core';
 
-// ─── Utility ────────────────────────────────────────────────────────────────
+// ─── Env ─────────────────────────────────────────────────────────────────────
+
+const LOCAL_CHROME_PATH =
+  process.env.CHROME_PATH ||
+  'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+
+const IS_LOCAL = process.env.NODE_ENV === 'development';
+
+// ─── Utility ──────────────────────────────────────────────────────────────────
 
 function sanitizeFileName(name: string): string {
+  if (!name || name.trim() === '') return `Document_${Date.now()}`;
   return name
-    .replace(/[^\w\s\-\.]/g, '')
-    .replace(/\s+/g, '_')
-    .substring(0, 100)
-    .trim() || 'document';
+    .replace(/[/\\?%*:|"<>]/g, '-')
+    .trim()
+    .substring(0, 100);
 }
 
-// ─── Academia.edu Handler ────────────────────────────────────────────────────
+// ─── Browser Factory (only used for Scribd) ───────────────────────────────────
 
-async function handleAcademia(url: string, browser: import('puppeteer').Browser) {
-  const page = await browser.newPage();
+async function launchBrowser(): Promise<Browser> {
+  return puppeteer.launch({
+    args: [
+      ...chromium.args,
+      '--disable-web-security',
+      '--force-device-scale-factor=1',
+    ],
+    executablePath: IS_LOCAL
+      ? LOCAL_CHROME_PATH
+      : await chromium.executablePath(),
+    headless: IS_LOCAL ? true : (chromium.headless as any),
+  }) as unknown as Browser;
+}
 
-  try {
-    // Set a realistic user agent
-    await page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    );
+// ─── 1. Academia.edu Handler — uses downacademia.net API (no browser needed) ──
 
-    // Navigate to the Academia.edu page
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+async function handleAcademia(url: string): Promise<{
+  fileName: string;
+  base64: string;
+  meta: { title: string; description: string; author: string; thumbnail: string };
+}> {
+  // Step 1: Parse/submit the paper URL
+  const parseRes = await fetch('https://downacademia.net/api/parse_paper', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }),
+  });
 
-    // Extract metadata
-    const meta = await page.evaluate(() => {
-      const title =
-        document.querySelector('meta[property="og:title"]')?.getAttribute('content') ||
-        document.querySelector('h1')?.textContent ||
-        document.title ||
-        'Untitled Document';
-
-      const description =
-        document.querySelector('meta[property="og:description"]')?.getAttribute('content') ||
-        document.querySelector('meta[name="description"]')?.getAttribute('content') ||
-        '';
-
-      const author =
-        document.querySelector('meta[name="author"]')?.getAttribute('content') ||
-        document.querySelector('[data-author]')?.getAttribute('data-author') ||
-        '';
-
-      const thumbnail =
-        document.querySelector('meta[property="og:image"]')?.getAttribute('content') || '';
-
-      return { title, description, author, thumbnail };
-    });
-
-    // Try to find a direct PDF download link first
-    const directPdfUrl = await page.evaluate(() => {
-      // Look for direct PDF links
-      const links = Array.from(document.querySelectorAll('a[href]'));
-      for (const link of links) {
-        const href = (link as HTMLAnchorElement).href;
-        if (href.includes('.pdf') && !href.includes('javascript')) {
-          return href;
-        }
-      }
-
-      // Look for download buttons
-      const downloadBtn = document.querySelector(
-        '[data-behavior="download"], .js-download, a[href*="download"]'
-      ) as HTMLAnchorElement | null;
-      return downloadBtn?.href || null;
-    });
-
-    // ── Attempt 1: Direct PDF URL ────────────────────────────────────────────
-    if (directPdfUrl) {
-      const pdfResponse = await page.goto(directPdfUrl, { waitUntil: 'networkidle2', timeout: 60000 });
-      const contentType = pdfResponse?.headers()['content-type'] || '';
-
-      if (contentType.includes('pdf')) {
-        const pdfBuffer = await pdfResponse?.buffer();
-        if (pdfBuffer) {
-          await page.close();
-          return {
-            fileName: sanitizeFileName(meta.title),
-            base64: `data:application/pdf;base64,${pdfBuffer.toString('base64')}`,
-            meta,
-          };
-        }
-      }
-    }
-
-    // ── Attempt 2: Print the page as PDF ────────────────────────────────────
-    // Re-navigate to the original URL if we left it
-    const currentUrl = page.url();
-    if (!currentUrl.includes('academia.edu')) {
-      await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
-    }
-
-    // Inject CSS to clean up the page for PDF generation
-    await page.addStyleTag({
-      content: `
-        /* Hide navigation, ads, popups, and UI chrome */
-        nav, header, footer, .js-modal, .modal, .overlay, .popup,
-        .cookie-banner, .signup-wall, .login-prompt, .ads, [class*="ad-"],
-        .share-bar, .recommendation, .sidebar, .related-works,
-        .toolbar, .sticky-header, [class*="paywall"], [class*="upsell"],
-        [class*="signup"], [class*="login-"], [class*="auth-"],
-        .notification, .toast, .alert-banner { 
-          display: none !important; 
-        }
-        
-        /* Ensure the document content is visible */
-        body { background: white !important; color: black !important; }
-        .document-page, .page, article, main { 
-          display: block !important; 
-          visibility: visible !important;
-          width: 100% !important;
-        }
-        
-        /* Remove fixed positioning that interferes */
-        [style*="position: fixed"], [style*="position:fixed"] {
-          position: relative !important;
-        }
-      `
-    });
-
-    await page.emulateMediaType('screen');
-
-    const pdf = await page.pdf({
-      format: 'A4',
-      printBackground: false,
-      margin: { top: '20px', right: '20px', bottom: '20px', left: '20px' },
-    });
-
-    await page.close();
-
-    return {
-      fileName: sanitizeFileName(meta.title),
-      base64: `data:application/pdf;base64,${Buffer.from(pdf).toString('base64')}`,
-      meta,
-    };
-  } catch (err) {
-    await page.close();
-    throw err;
+  if (!parseRes.ok) {
+    throw new Error(`Academia API error: ${parseRes.status} ${parseRes.statusText}`);
   }
+
+  const parseData = await parseRes.json();
+  console.log('[academia] parseData:', parseData);
+
+  if (!parseData.success) {
+    throw new Error('Academia Parse Failed: ' + (parseData.message || 'Unknown error'));
+  }
+
+  const apiTitle: string = parseData.data.title || 'Academia_Document';
+  const docId: string = parseData.data.documentId;
+
+  // Step 2: Poll until the PDF is ready (max ~24 seconds)
+  let downloadUrl = '';
+  for (let i = 0; i < 12; i++) {
+    const statusRes = await fetch(
+      `https://downacademia.net/api/check_status?id=${docId}`
+    );
+    const statusData = await statusRes.json();
+
+    if (statusData.success && statusData.data?.status === 'completed') {
+      downloadUrl = statusData.data.file?.url || '';
+      break;
+    }
+
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+
+  if (!downloadUrl) throw new Error('Academia download timed out. Please try again.');
+
+  // Step 3: Download the PDF buffer
+  const pdfRes = await fetch(downloadUrl);
+  if (!pdfRes.ok) throw new Error('Failed to download PDF from Academia.');
+  const pdfBuffer = Buffer.from(await pdfRes.arrayBuffer());
+
+  // Step 4: Fetch page metadata for preview (title, thumbnail, etc.)
+  let meta = { title: apiTitle, description: '', author: '', thumbnail: '' };
+  try {
+    const htmlRes = await fetch(url, {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+      },
+    });
+    const html = await htmlRes.text();
+
+    const getMetaContent = (prop: string) => {
+      const m =
+        html.match(
+          new RegExp(
+            `<meta[^>]+(?:property|name)=["']${prop}["'][^>]+content=["']([^"']+)["']`,
+            'i'
+          )
+        ) ||
+        html.match(
+          new RegExp(
+            `<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["']${prop}["']`,
+            'i'
+          )
+        );
+      return m?.[1] || '';
+    };
+
+    meta = {
+      title: apiTitle, // always prefer the API title
+      description:
+        getMetaContent('og:description') || getMetaContent('description'),
+      author: getMetaContent('author'),
+      thumbnail: getMetaContent('og:image'),
+    };
+  } catch {
+    // metadata fetch is best-effort — don't fail the whole request
+  }
+
+  return {
+    fileName: `${sanitizeFileName(apiTitle)}.pdf`,
+    base64: `data:application/pdf;base64,${pdfBuffer.toString('base64')}`,
+    meta,
+  };
 }
 
-// ─── Scribd Handler (as provided by user) ───────────────────────────────────
+// ─── 2. Scribd Handler — Puppeteer (event-aware sequential hydration) ─────────
 
-async function handleScribd(url: string, browser: import('puppeteer').Browser) {
+async function handleScribd(url: string, browser: Browser): Promise<{
+  fileName: string;
+  base64: string;
+  meta: { title: string; description: string; author: string; thumbnail: string };
+}> {
   const page = await browser.newPage();
   const docId = url.match(/document\/(\d+)/)?.[1];
 
-  if (!docId) throw new Error('Invalid Scribd ID');
+  if (!docId) throw new Error('Invalid Scribd URL — could not extract document ID.');
 
-  // 1. Capture metadata for the sanitized filename
+  // 1. Capture metadata / title
   await page.goto(url, { waitUntil: 'domcontentloaded' });
-  const title = await page.evaluate(() =>
-    document.querySelector('meta[property="og:title"]')?.getAttribute('content') || document.title
+  const title = await page.evaluate(
+    () =>
+      document
+        .querySelector('meta[property="og:title"]')
+        ?.getAttribute('content') || document.title
   );
 
-  // 2. Load the Embed player (the engine for the GraphQL events)
+  // 2. Load the embed player
   const embedUrl = `https://www.scribd.com/embeds/${docId}/content?start_page=1&view_mode=scroll`;
   await page.goto(embedUrl, { waitUntil: 'networkidle2', timeout: 60000 });
 
-  // 3. INJECT DE-VIRTUALIZATION & COMPRESSION CSS
+  // 3. De-virtualisation CSS
   await page.addStyleTag({
     content: `
       #doc_container { width: 100% !important; height: auto !important; }
-      .react-pdf__Page, .page_bundle, .page-container { 
-        display: block !important; 
-        visibility: visible !important; 
-        position: relative !important; 
+      .react-pdf__Page, .page_bundle, .page-container {
+        display: block !important;
+        visibility: visible !important;
+        position: relative !important;
         width: 100% !important;
         height: auto !important;
         break-after: page !important;
         opacity: 1 !important;
       }
       .blurred_page, .loading_bridge, .upsell, .header, .footer { display: none !important; }
-    `
+    `,
   });
 
-  // 4. THE ASSEMBLY LOGIC: Sequential Hydration
+  // 4. Sequential hydration — scroll each page into view and wait for tiles
   await page.evaluate(async () => {
-    const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
+    const delay = (ms: number) => new Promise((res) => setTimeout(res, ms));
     const pageElements = document.querySelectorAll('.react-pdf__Page, .page_bundle');
 
     for (const pageEl of Array.from(pageElements)) {
@@ -186,47 +186,53 @@ async function handleScribd(url: string, browser: import('puppeteer').Browser) {
       let attempts = 0;
       while (attempts < 25) {
         const isLoaded = pageEl.querySelector('canvas, img, .text_layer');
-        const isStillFetching = pageEl.querySelector('.fetching, .spinner, .loading_bridge');
-
+        const isStillFetching = pageEl.querySelector(
+          '.fetching, .spinner, .loading_bridge'
+        );
         if (isLoaded && !isStillFetching) break;
-
         await delay(400);
         attempts++;
       }
     }
   });
 
-  // 5. PDF GENERATION
+  // 5. Generate PDF
   await page.emulateMediaType('screen');
-
   const pdf = await page.pdf({
     format: 'A4',
     printBackground: true,
     preferCSSPageSize: true,
-    margin: { top: 0, right: 0, bottom: 0, left: 0 }
+    margin: { top: 0, right: 0, bottom: 0, left: 0 },
   });
 
   await page.close();
 
+  const cleanTitle =
+    !title || title.toLowerCase().includes('scribd')
+      ? `Scribd_Document_${Date.now()}`
+      : title;
+
   return {
-    fileName: sanitizeFileName(title),
+    fileName: `${sanitizeFileName(cleanTitle)}.pdf`,
     base64: `data:application/pdf;base64,${Buffer.from(pdf).toString('base64')}`,
-    meta: { title, description: '', author: '', thumbnail: '' },
+    meta: { title: cleanTitle, description: '', author: '', thumbnail: '' },
   };
 }
 
-// ─── URL Classifier ──────────────────────────────────────────────────────────
+// ─── URL Classifier ───────────────────────────────────────────────────────────
 
-function classifyUrl(url: string): 'academia' | 'scribd' | 'unknown' {
-  if (url.includes('academia.edu')) return 'academia';
-  if (url.includes('scribd.com')) return 'scribd';
-  return 'unknown';
+type Platform = 'ACADEMIA' | 'SCRIBD' | 'UNKNOWN';
+
+function classifyUrl(url: string): Platform {
+  if (url.includes('academia.edu')) return 'ACADEMIA';
+  if (url.includes('scribd.com')) return 'SCRIBD';
+  return 'UNKNOWN';
 }
 
-// ─── Route Handler ───────────────────────────────────────────────────────────
+// ─── POST — Main download handler ─────────────────────────────────────────────
 
 export async function POST(request: NextRequest) {
-  let browser: import('puppeteer').Browser | null = null;
+  let browser: Browser | null = null;
 
   try {
     const body = await request.json();
@@ -236,7 +242,6 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'URL is required' }, { status: 400 });
     }
 
-    // Validate URL format
     let parsedUrl: URL;
     try {
       parsedUrl = new URL(url);
@@ -244,34 +249,25 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Invalid URL format' }, { status: 400 });
     }
 
-    const urlType = classifyUrl(parsedUrl.toString());
+    const platform = classifyUrl(parsedUrl.toString());
 
-    if (urlType === 'unknown') {
+    if (platform === 'UNKNOWN') {
       return NextResponse.json(
-        { error: 'Only Academia.edu and Scribd URLs are supported' },
+        { error: 'Only Academia.edu and Scribd URLs are supported.' },
         { status: 400 }
       );
     }
 
-    // Launch Puppeteer
-    const puppeteer = await import('puppeteer');
-    browser = await puppeteer.default.launch({
-      headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--disable-gpu',
-        '--window-size=1280,900',
-      ],
-    });
+    let result: { fileName: string; base64: string; meta: { title: string; description: string; author: string; thumbnail: string } };
 
-    // Route to the appropriate handler
-    const result =
-      urlType === 'academia'
-        ? await handleAcademia(url, browser)
-        : await handleScribd(url, browser);
+    if (platform === 'ACADEMIA') {
+      // Academia uses a plain HTTP API — no browser required
+      result = await handleAcademia(url);
+    } else {
+      // Scribd needs a real browser
+      browser = await launchBrowser();
+      result = await handleScribd(url, browser);
+    }
 
     return NextResponse.json({
       success: true,
@@ -281,50 +277,65 @@ export async function POST(request: NextRequest) {
     });
   } catch (error: unknown) {
     console.error('[fetch-pdf] Error:', error);
-    const message = error instanceof Error ? error.message : 'Failed to fetch document';
+    const message =
+      error instanceof Error ? error.message : 'Failed to fetch document';
     return NextResponse.json({ error: message }, { status: 500 });
   } finally {
-    if (browser) {
-      await browser.close().catch(() => {});
-    }
+    if (browser) await browser.close().catch(() => { });
   }
 }
 
-// ─── Metadata Prefetch (GET) ─────────────────────────────────────────────────
+// ─── GET — Metadata prefetch ──────────────────────────────────────────────────
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const url = searchParams.get('url');
 
   if (!url) {
-    return NextResponse.json({ error: 'URL parameter required' }, { status: 400 });
+    return NextResponse.json({ error: 'url parameter required' }, { status: 400 });
   }
 
   try {
-    const parsedUrl = new URL(url);
+    new URL(url); // validate
+  } catch {
+    return NextResponse.json({ error: 'Invalid URL' }, { status: 400 });
+  }
 
-    if (!classifyUrl(parsedUrl.toString())) {
-      return NextResponse.json({ error: 'Unsupported URL' }, { status: 400 });
-    }
+  if (classifyUrl(url) === 'UNKNOWN') {
+    return NextResponse.json({ error: 'Unsupported URL' }, { status: 400 });
+  }
 
-    // Quick metadata fetch without puppeteer
+  try {
     const response = await fetch(url, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+        'User-Agent':
+          'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
       },
     });
 
     const html = await response.text();
 
-    const getMetaContent = (property: string) => {
-      const match = html.match(new RegExp(`<meta[^>]+(?:property|name)=["']${property}["'][^>]+content=["']([^"']+)["']`, 'i')) ||
-                    html.match(new RegExp(`<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["']${property}["']`, 'i'));
-      return match?.[1] || '';
+    const getMetaContent = (prop: string) => {
+      const m =
+        html.match(
+          new RegExp(
+            `<meta[^>]+(?:property|name)=["']${prop}["'][^>]+content=["']([^"']+)["']`,
+            'i'
+          )
+        ) ||
+        html.match(
+          new RegExp(
+            `<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["']${prop}["']`,
+            'i'
+          )
+        );
+      return m?.[1] || '';
     };
 
     const meta = {
       title: getMetaContent('og:title') || url,
-      description: getMetaContent('og:description') || getMetaContent('description'),
+      description:
+        getMetaContent('og:description') || getMetaContent('description'),
       author: getMetaContent('author'),
       thumbnail: getMetaContent('og:image'),
     };
@@ -332,6 +343,9 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ success: true, meta });
   } catch (error) {
     console.error('[metadata] Error:', error);
-    return NextResponse.json({ error: 'Failed to fetch metadata' }, { status: 500 });
+    return NextResponse.json(
+      { error: 'Failed to fetch metadata' },
+      { status: 500 }
+    );
   }
 }
